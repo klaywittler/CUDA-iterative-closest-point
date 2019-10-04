@@ -3,7 +3,6 @@
 #include <cstring>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtx/string_cast.hpp>
-#include "tiny_gltf.h"
 #include "utilityCore.hpp"
 
 PointCloud::PointCloud(string filename) {
@@ -20,7 +19,7 @@ PointCloud::PointCloud(string filename) {
         utilityCore::safeGetline(fp_in, line);
         if (!line.empty()) {
             vector<string> tokens = utilityCore::tokenizeString(line);
-			glm::vec3 p(atoi(tokens[2].c_str()), atoi(tokens[0].c_str()), atoi(tokens[1].c_str()));
+			glm::vec3 p(atoi(tokens[0].c_str()), atoi(tokens[1].c_str()), atoi(tokens[2].c_str()));
 			points.push_back(p);
         }
     }

@@ -14,7 +14,7 @@
 // ================
 #define VISUALIZE 1
 #define TIME 0
-#define GPU 0
+#define GPU 1
 
 int N_FOR_VIS;
 const PointCloud *start = NULL;
@@ -24,10 +24,11 @@ PointCloud *target = NULL;
 * C main function.
 */
 int main(int argc, char* argv[]) {
+
 	projectName = "CUDA Accelerated ICP";
 
 	start = new PointCloud(argv[1]);
-	start = new PointCloud(argv[2]);
+	target = new PointCloud(argv[2]);
 	N_FOR_VIS = start->points.size() + target->points.size();
 
 	if (init(argc, argv)) {
@@ -111,6 +112,10 @@ bool init(int argc, char **argv) {
 
 	cudaGLRegisterBufferObject(boidVBO_positions);
 	cudaGLRegisterBufferObject(boidVBO_velocities);
+
+	// Initialize N-body simulation
+	//ICP::unitTest();
+	ICP::initSimulation(start->points, target->points);
 
 	updateCamera();
 
@@ -205,9 +210,9 @@ void runCUDA() {
 	#endif
 
 	#if GPU
-
+	ICP::stepGPU();
 	#else
-
+	ICP::stepCPU();
 	#endif
 
 	#if TIME

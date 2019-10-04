@@ -33,6 +33,17 @@ if(WIN32)
     # Set up include and lib paths
     set(CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER} CACHE FILEPATH "Host side compiler used by NVCC" FORCE)
 endif(WIN32)
+
+link_directories(${CUDA_TOOLKIT_ROOT_DIR}/lib/x64)
+########################################
+
+
+########################################
+# CPU Setup
+########################################
+#list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}")
+#find_package(Eigen3 REQUIRED)
+#include_directories(${EIGEN3_INCLUDE_DIR})
 ########################################
 
 find_package(OpenGL REQUIRED)
@@ -83,6 +94,8 @@ list(SORT sources)
 
 source_group(Headers FILES ${headers})
 source_group(Sources FILES ${sources})
+
+add_subdirectory(Eigen)
 
 cuda_add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers})
 target_link_libraries(${CMAKE_PROJECT_NAME} 

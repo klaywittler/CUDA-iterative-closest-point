@@ -8,6 +8,7 @@
 
 #include <iostream>
 #include <cstdio>
+#include <locale>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
 #include "utilityCore.hpp"
@@ -101,6 +102,7 @@ glm::mat4 utilityCore::cudaMat4ToGlmMat4(const cudaMat4 &a) {
 
 std::vector<std::string> utilityCore::tokenizeString(std::string str) {
     std::stringstream strstr(str);
+	//strstr.imbue(std::locale(std::locale(), new csv_reader()));
     std::istream_iterator<std::string> it(strstr);
     std::istream_iterator<std::string> end;
     std::vector<std::string> results(it, end);
