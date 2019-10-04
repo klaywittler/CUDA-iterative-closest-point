@@ -6,6 +6,7 @@
 #include "utilityCore.hpp"
 #include "icp.h"
 #include <cublas_v2.h>
+#include <cusolverDn.h>
 //#include <Eigen/Dense>
 
 
@@ -52,10 +53,13 @@ int targetSize;
 dim3 threadsPerBlock(blockSize);
 
 glm::vec3 *dev_pos;
+glm::vec3 *dev_start;
+glm::vec3 *dev_target;
 glm::vec3 *dev_color;
 int *dev_cor;
 
-glm::vec3 *pos;
+glm::vec3 *host_start;
+glm::vec3 *host_target;
 int *cor;
 
 /******************
@@ -98,18 +102,26 @@ void ICP::initSimulation(std::vector<glm::vec3> start, std::vector<glm::vec3> ta
 	numObjects = startSize + targetSize;
 	dim3 fullBlocksPerGrid((numObjects + blockSize - 1) / blockSize);
 
-	// LOOK-1.2 - This is basic CUDA memory management and error checking.
 	// Don't forget to cudaFree in  ICP::endSimulation.
+	cudaMalloc((void**)&dev_start, startSize * sizeof(glm::vec3));
+	checkCUDAErrorWithLine("cudaMalloc dev_start failed!");
+
+	cudaMalloc((void**)&dev_target, targetSize * sizeof(glm::vec3));
+	checkCUDAErrorWithLine("cudaMalloc dev_target failed!");
+
 	cudaMalloc((void**)&dev_pos, numObjects * sizeof(glm::vec3));
 	checkCUDAErrorWithLine("cudaMalloc dev_pos failed!");
 
 	cudaMalloc((void**)&dev_color, numObjects * sizeof(glm::vec3));
 	checkCUDAErrorWithLine("cudaMalloc dev_color failed!");
 
-	cudaMalloc((void**)&dev_cor, numObjects * sizeof(int));
+	cudaMalloc((void**)&dev_cor, startSize * sizeof(int));
 	checkCUDAErrorWithLine("cudaMalloc dev_vel1 failed!");
 
 	// move start and target points to GPU
+	cudaMemcpy(dev_start, &start[0], startSize * sizeof(glm::vec3), cudaMemcpyHostToDevice);
+	cudaMemcpy(dev_target, &target[0], targetSize * sizeof(glm::vec3), cudaMemcpyHostToDevice);
+
 	cudaMemcpy(dev_pos, &start[0], startSize * sizeof(glm::vec3), cudaMemcpyHostToDevice);
 	cudaMemcpy(&dev_pos[startSize], &target[0], targetSize * sizeof(glm::vec3), cudaMemcpyHostToDevice);
 
@@ -121,8 +133,23 @@ void ICP::initSimulation(std::vector<glm::vec3> start, std::vector<glm::vec3> ta
 
 	cudaDeviceSynchronize();
 
-	pos = (glm::vec3*)malloc(numObjects * sizeof(glm::vec3));
+	host_start = (glm::vec3*)malloc(startSize * sizeof(glm::vec3));
+	host_target = (glm::vec3*)malloc(targetSize * sizeof(glm::vec3));
 	cor = (int*)malloc(numObjects * sizeof(int));
+}
+
+
+void ICP::endSimulation() {
+	cudaFree(dev_pos);
+	cudaFree(dev_start);
+	cudaFree(dev_target);
+	cudaFree(dev_cor);
+	cudaFree(dev_color);
+
+	free(host_start);
+	free(host_target);
+	free(cor);
+
 }
 
 
@@ -166,7 +193,7 @@ void ICP::copyToVBO(float *vbodptr_positions, float *vbodptr_velocities) {
   kernCopyPositionsToVBO << <fullBlocksPerGrid, blockSize >> >(numObjects, dev_pos, vbodptr_positions, scene_scale);
   kernCopyColorToVBO << <fullBlocksPerGrid, blockSize >> >(numObjects, dev_color, vbodptr_velocities, scene_scale);
 
-  checkCUDAErrorWithLine("copyBoidsToVBO failed!");
+  checkCUDAErrorWithLine("copyToVBO failed!");
 
   cudaDeviceSynchronize();
 }
@@ -198,10 +225,10 @@ void printMat(float*P, int uWP, int uHP) {
 
 void correspondenceCPU() {
 	for (int i = 0; i < startSize; i++) {
-		float best = glm::distance(pos[i], pos[startSize+i]);
+		float best = glm::distance(host_start[i], host_target[0]);
 		cor[i] = 0; //startSize
 		for (int j = 1; j < targetSize; j++) {
-			float dist = glm::distance(pos[i], pos[startSize + j]);
+			float dist = glm::distance(host_start[i], host_target[j]);
 			if (dist < best) {
 				cor[i] = j; // j + startSize
 				best = dist;
@@ -225,17 +252,17 @@ void ICP::stepCPU() {
 }
 
 
-__global__ void correspondenceGPU(int n, int targetSize, glm::vec3 *pos, int *cor){
+__global__ void correspondenceGPU(int startSize, int targetSize, glm::vec3 *dev_start, glm::vec3 *dev_target, int *cor){
 	int index = threadIdx.x + (blockIdx.x * blockDim.x);
-	if (index >= n) {
+	if (index >= startSize) {
 		return;
 	}
-	float best = glm::distance(pos[index], pos[n + index]);
-	cor[index] = 0; //startSize
+	float best = glm::distance(dev_start[index], dev_target[0]);
+	cor[index] = 0;
 	for (int j = 1; j < targetSize; j++) {
-		float dist = glm::distance(pos[index], pos[n + j]);
+		float dist = glm::distance(dev_start[index], dev_target[j]);
 		if (dist < best) {
-			cor[index] = j; // j + startSize
+			cor[index] = j;
 			best = dist;
 		}
 
@@ -243,20 +270,62 @@ __global__ void correspondenceGPU(int n, int targetSize, glm::vec3 *pos, int *co
 }
 
 
-void ICP::stepGPU() {
-	dim3 fullblocksPerGrid((startSize + blockSize - 1) / blockSize);
-	correspondenceGPU << <fullblocksPerGrid, blockSize >> > (startSize, targetSize, dev_pos, dev_cor);
+__global__ void shuffleTarget(int startSize, glm::vec3 *dev_target, glm::vec3 *cor_target, int *cor) {
+	int index = threadIdx.x + (blockIdx.x * blockDim.x);
+	if (index >= startSize) {
+		return;
+	}
+	cor_target[index] = dev_target[cor[index]];
 }
 
 
-void ICP::endSimulation() {
-  cudaFree(dev_pos);
-  cudaFree(dev_cor);
-  cudaFree(dev_color);
+__global__ void translate(int n, glm::vec3 *pos, glm::vec3 T) {
+	int index = threadIdx.x + (blockIdx.x * blockDim.x);
+	if (index >= n) {
+		return;
+	}
+	pos[index] = pos[index] + T;
+}
 
-  free(pos);
-  free(cor);
 
+void ICP::stepGPU() {
+	dim3 startblocksPerGrid((startSize + blockSize - 1) / blockSize);
+	dim3 targetblocksPerGrid((targetSize + blockSize - 1) / blockSize);
+	// mean center both data sets
+	thrust::device_ptr<glm::vec3> thrust_target(dev_target);
+	thrust::device_ptr<glm::vec3> thrust_start(dev_start);
+
+	glm::vec3 targetMu = glm::vec3(thrust::reduce(thrust_target, thrust_target + targetSize)) / float(targetSize);
+	glm::vec3 startMu = glm::vec3(thrust::reduce(thrust_start, thrust_start + startSize)) / float(startSize);
+
+	translate << <targetblocksPerGrid, blockSize >> > (targetSize, dev_target, -targetMu);
+	translate << <startblocksPerGrid, blockSize >> > (startSize, dev_start, -startMu);
+
+	// find correspondences
+	glm::vec3 *cor_target;
+	cudaMalloc((void**)&cor_target, startSize * sizeof(glm::vec3));
+
+	correspondenceGPU <<<startblocksPerGrid, blockSize >>> (startSize, targetSize, dev_start, dev_target, dev_cor);
+	shuffleTarget <<<startblocksPerGrid, blockSize >>> (startSize, dev_target, cor_target, cor);
+
+	// multiply cor_target and dev_start for svd
+	//sMatrixSize matrix_size = { WA, HA, WB, HB, WB, HA };
+
+	//cublasHandle_t handle;
+	//cublasCreate(&handle);
+
+	//matrixMultiply(&handle, matrix_size, dev_start, cor_target, d_C);
+
+	// svd
+
+
+	// multiply for R, rotation
+
+	// find T, tranlations
+
+	// move start set
+
+	cudaFree(cor_target);
 }
 
 
@@ -265,15 +334,7 @@ void indexInit(float *data, int size) {
 		data[i] = (float)i;
 }
 
-
-void ICP::unitTest() {
-	//Eigen::MatrixXd m(2, 2);
-	//m(0, 0) = 3;
-	//m(1, 0) = 2.5;
-	//m(0, 1) = -1;
-	//m(1, 1) = m(1, 0) + m(0, 1);
-	//std::cout << m << std::endl;
-
+void matrixTest() {
 	int HA = 3, WA = 3, HB = 3, WB = 1;
 	sMatrixSize matrix_size = { WA, HA, WB, HB, WB, HA };
 
@@ -336,5 +397,92 @@ void ICP::unitTest() {
 	cudaFree(d_A);
 	cudaFree(d_B);
 	cudaFree(d_C);
+}
+
+void svdTest() {
+	int HA = 3, WA = 3, HB = 3, WB = 1;
+	sMatrixSize matrix_size = { WA, HA, WB, HB, WB, HA };
+
+	int work_size = 0;
+	int *devInfo; cudaMalloc(&devInfo, sizeof(int));
+
+	// allocate host memory for matrices A and B
+	unsigned int size_C = matrix_size.WC * matrix_size.HC;
+	unsigned int mem_size_C = sizeof(float) * size_C;
+	float *h_C = (float *)malloc(mem_size_C);
+	float *d_C;
+
+	int Nrows = matrix_size.HC;
+	int Ncols = matrix_size.WC;
+	// initialize host memory
+	indexInit(h_C, size_C);
+	cudaMalloc((void **)&d_C, mem_size_C);
+	cudaMemcpy(d_C, h_C, mem_size_C, cudaMemcpyHostToDevice);
+
+	// --- host side SVD results space
+	float *h_U = (float *)malloc(Nrows * Nrows * sizeof(float));
+	float *h_V = (float *)malloc(Ncols * Ncols * sizeof(float));
+	float *h_S = (float *)malloc(std::min(Nrows, Ncols) * sizeof(float));
+
+	// --- device side SVD workspace and matrices
+	float *d_U; cudaMalloc(&d_U, Nrows * Nrows * sizeof(float));
+	float *d_V; cudaMalloc(&d_V, Ncols * Ncols * sizeof(float));
+	float *d_S; cudaMalloc(&d_S, std::min(Nrows, Ncols) * sizeof(float));
+
+
+	// --- CUDA solver initialization
+	cusolverDnHandle_t solver_handle;
+	cusolverDnCreate(&solver_handle);
+
+	// --- CUDA SVD initialization
+	cusolverDnSgesvd_bufferSize(solver_handle, matrix_size.HC, matrix_size.WC, &work_size);
+	float *work; cudaMalloc(&work, work_size * sizeof(float));
+
+	// --- CUDA SVD execution
+	cusolverDnSgesvd(solver_handle, 'A', 'A', matrix_size.HC, matrix_size.WC, d_C, matrix_size.HC, d_S, d_U, matrix_size.HC, d_V, matrix_size.WC, work, work_size, NULL, devInfo);
+
+
+	std::cout << "Singular values\n";
+	for (int i = 0; i < std::min(Nrows, Ncols); i++)
+		std::cout << "d_S[" << i << "] = " << h_S[i] << std::endl;
+
+	std::cout << "\nLeft singular vectors - For y = A * x, the columns of U span the space of y\n";
+	for (int j = 0; j < Nrows; j++) {
+		printf("\n");
+		for (int i = 0; i < Nrows; i++)
+			printf("U[%i,%i]=%f\n", i, j, h_U[j*Nrows + i]);
+	}
+
+	std::cout << "\nRight singular vectors - For y = A * x, the columns of V span the space of x\n";
+	for (int i = 0; i < Ncols; i++) {
+		printf("\n");
+		for (int j = 0; j < Ncols; j++)
+			printf("V[%i,%i]=%f\n", i, j, h_V[j*Ncols + i]);
+	}
+
+	cusolverDnDestroy(solver_handle);
+
+	cudaFree(d_C);
+	cudaFree(d_U);
+	cudaFree(d_S);
+	cudaFree(d_V);
+	cudaFree(devInfo);
+	cudaFree(work);
+	free(h_C);
+	free(h_U);
+	free(h_S);
+	free(h_V);
+}
+
+void ICP::unitTest() {
+	//Eigen::MatrixXd m(2, 2);
+	//m(0, 0) = 3;
+	//m(1, 0) = 2.5;
+	//m(0, 1) = -1;
+	//m(1, 1) = m(1, 0) + m(0, 1);
+	//std::cout << m << std::endl;
+	matrixTest();
+	svdTest();
+	
 	return;
 }

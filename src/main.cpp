@@ -114,7 +114,7 @@ bool init(int argc, char **argv) {
 	cudaGLRegisterBufferObject(boidVBO_velocities);
 
 	// Initialize N-body simulation
-	//ICP::unitTest();
+	ICP::unitTest();
 	ICP::initSimulation(start->points, target->points);
 
 	updateCamera();
