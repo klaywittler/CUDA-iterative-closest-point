@@ -79,6 +79,7 @@ set(headers
     src/main.hpp
     src/utilityCore.hpp
     src/pointCloud.h
+    src/svd3.h
     )
 
 set(sources

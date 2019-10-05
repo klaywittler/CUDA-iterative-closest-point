@@ -7,7 +7,7 @@
 #include "icp.h"
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
-#include <cusolverDn.h>
+//#include <cusolverDn.h>
 //#include <Eigen/Dense>
 
 
@@ -288,6 +288,13 @@ __global__ void translate(int n, glm::vec3 *pos, glm::vec3 T) {
 	pos[index] = pos[index] + T;
 }
 
+__global__ void outerProduct(int n, glm::vec3 *dev_target, glm::vec3 *dev_start, glm::mat3 *product) {
+	int index = threadIdx.x + (blockIdx.x * blockDim.x);
+	if (index >= n) {
+		return;
+	}
+	product[0] += glm::outerProduct(dev_target[index], dev_start[index]);
+}
 
 void ICP::stepGPU() {
 	dim3 startblocksPerGrid((startSize + blockSize - 1) / blockSize);
@@ -303,7 +310,7 @@ void ICP::stepGPU() {
 	translate << <startblocksPerGrid, blockSize >> > (startSize, dev_start, -startMu);
 	checkCUDAErrorWithLine("mean center");
 
-	//// find correspondences
+	// find correspondences
 	glm::vec3 *cor_target;
 	cudaMalloc((void**)&cor_target, startSize * sizeof(glm::vec3));
 
@@ -312,13 +319,12 @@ void ICP::stepGPU() {
 	shuffleTarget <<<startblocksPerGrid, blockSize >>> (startSize, dev_target, cor_target, dev_cor);
 	checkCUDAErrorWithLine("shuffle");
 
-	// multiply cor_target and dev_start for svd
-	//sMatrixSize matrix_size = { WA, HA, WB, HB, WB, HA };
+	// outer product of cor_target and dev_start for svd
+	glm::mat3 *dev_W;
+	cudaMalloc((void**)&dev_W, sizeof(glm::mat3));
+	cudaMemset(dev_W, 0, sizeof(glm::mat3));
 
-	//cublasHandle_t handle;
-	//cublasCreate(&handle);
-
-	//matrixMultiply(&handle, matrix_size, dev_start, cor_target, d_C);
+	outerProduct << <startblocksPerGrid, blockSize >> > (startSize, dev_target, dev_start, dev_W);
 
 	// svd
 
@@ -328,7 +334,8 @@ void ICP::stepGPU() {
 	// find T, tranlations
 
 	// move start set
-	//cudaDeviceSynchronize();
+
+
 	cudaFree(cor_target);
 	checkCUDAErrorWithLine("free memeory");
 }
@@ -486,7 +493,7 @@ void ICP::unitTest() {
 	//m(0, 1) = -1;
 	//m(1, 1) = m(1, 0) + m(0, 1);
 	//std::cout << m << std::endl;
-	matrixTest();
+	//matrixTest();
 	//svdTest();
 	
 	return;
