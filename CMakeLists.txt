@@ -72,6 +72,10 @@ set(GLM_ROOT_DIR "external")
 find_package(GLM REQUIRED)
 include_directories(${GLM_INCLUDE_DIRS})
 
+#set(EIGEN_ROOT_DIR "external")
+#find_package(EIGEN REQUIRED)
+#include_directories(${EIGEN_INCLUDE_DIRS})
+
 set(headers
     src/cudaMat4.hpp
     src/glslUtility.hpp
@@ -80,6 +84,7 @@ set(headers
     src/utilityCore.hpp
     src/pointCloud.h
     src/svd3.h
+    src/svd.h
     )
 
 set(sources
@@ -96,7 +101,8 @@ list(SORT sources)
 source_group(Headers FILES ${headers})
 source_group(Sources FILES ${sources})
 
-add_subdirectory(Eigen)
+#include_directories(.)
+#add_subdirectory(Eigen)
 
 cuda_add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers})
 target_link_libraries(${CMAKE_PROJECT_NAME} 

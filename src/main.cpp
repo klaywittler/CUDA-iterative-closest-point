@@ -26,9 +26,11 @@ PointCloud *target = NULL;
 int main(int argc, char* argv[]) {
 
 	projectName = "CUDA Accelerated ICP";
+	const char *startFile = argv[1] == NULL ? "../data/sine.txt" : argv[1];
+	const char *targetFile = argv[1] == NULL ? "../data/cosine.txt" : argv[2];
 
-	start = new PointCloud(argv[1]);
-	target = new PointCloud(argv[2]);
+	start = new PointCloud(startFile);
+	target = new PointCloud(targetFile);
 	N_FOR_VIS = start->points.size() + target->points.size();
 
 	if (init(argc, argv)) {
