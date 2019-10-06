@@ -4,16 +4,11 @@
 #include <cmath>
 #include <thrust/reduce.h>
 #include <glm/glm.hpp>
-#include <glm/gtc/type_ptr.hpp>
 #include "utilityCore.hpp"
 #include "icp.h"
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include "svd3.h"
-//#include <cusolverDn.h>
-//#include <Eigen/Dense>
-
-
 
 #define checkCUDAErrorWithLine(msg) checkCUDAError(msg, __LINE__)
 
@@ -31,14 +26,12 @@ void checkCUDAError(const char *msg, int line = -1) {
   }
 }
 
-
 /*****************
 * Configuration *
 *****************/
 
 /*! Block size used for CUDA kernel launch. */
 #define blockSize 128
-
 /*! Size of the starting area in simulation space. */
 #define scene_scale 25.0f
 
@@ -68,7 +61,6 @@ int *cor;
 /******************
 * initSimulation *
 ******************/
-
 __host__ __device__ unsigned int hash(unsigned int a) {
   a = (a + 0x7ed55d16) + (a << 12);
   a = (a ^ 0xc761c23c) ^ (a >> 19);
@@ -204,7 +196,6 @@ void ICP::copyToVBO(float *vbodptr_positions, float *vbodptr_velocities) {
   cudaDeviceSynchronize();
 }
 
-
 /******************
 * stepSimulation *
 ******************/
@@ -278,12 +269,11 @@ void ICP::stepCPU() {
 	}
 	
 	// outer product of cor_target and dev_start for svd
-	glm::mat3 W(0.0f), U, S, V;
-	outerProductCPU(cor_target, temp_start, W);
+	glm::mat3 M(0.0f), U, S, V;
+	outerProductCPU(cor_target, temp_start, M);
 
 	// svd
-	//svd(W, U, S, V);
-	svd(W[0][0], W[0][1], W[0][2], W[1][0], W[1][1], W[1][2], W[2][0], W[2][1], W[2][2],
+	svd(M[0][0], M[0][1], M[0][2], M[1][0], M[1][1], M[1][2], M[2][0], M[2][1], M[2][2],
 		U[0][0], U[0][1], U[0][2], U[1][0], U[1][1], U[1][2], U[2][0], U[2][1], U[2][2],
 		S[0][0], S[0][1], S[0][2], S[1][0], S[1][1], S[1][2], S[2][0], S[2][1], S[2][2],
 		V[0][0], V[0][1], V[0][2], V[1][0], V[1][1], V[1][2], V[2][0], V[2][1], V[2][2]
@@ -304,26 +294,25 @@ void ICP::stepCPU() {
 	free(cor_target);
 }
 
-__global__ void correspondenceGPU(int startSize, int targetSize, glm::vec3 *dev_start, glm::vec3 *dev_target, int *cor){
+__global__ void correspondenceGPU(int startSize, int targetSize, glm::vec3 *dev_start, glm::vec3 *dev_target, int *dev_cor){
 	int index = threadIdx.x + (blockIdx.x * blockDim.x);
 	if (index >= startSize) {
 		return;
 	}
 	float best = glm::distance(dev_start[index], dev_target[0]);
-	cor[index] = 0;
+	dev_cor[index] = 0;
 	for (int j = 1; j < targetSize; j++) {
 		float dist = glm::distance(dev_start[index], dev_target[j]);
 		if (dist < best) {
-			cor[index] = j;
+			dev_cor[index] = j;
 			best = dist;
 		}
-
 	}
 }
 
-__global__ void shuffleTarget(int startSize, glm::vec3 *dev_target, glm::vec3 *cor_target, int *cor) {
+__global__ void shuffleTarget(int n, glm::vec3 *dev_target, glm::vec3 *cor_target, int *cor) {
 	int index = threadIdx.x + (blockIdx.x * blockDim.x);
-	if (index >= startSize) {
+	if (index >= n) {
 		return;
 	}
 	cor_target[index] = dev_target[cor[index]];
@@ -342,7 +331,6 @@ __global__ void outerProduct(int n, glm::vec3 *dev_target, glm::vec3 *dev_start,
 	if (index >= n) {
 		return;
 	}
-	//*product += glm::outerProduct(dev_start[index], dev_target[index]);
 	 product[index] = glm::outerProduct(dev_start[index], dev_target[index]);
 }
 
@@ -361,8 +349,8 @@ void ICP::stepGPU() {
 	thrust::device_ptr<glm::vec3> thrust_target(dev_target);
 	thrust::device_ptr<glm::vec3> thrust_start(dev_start);
 
-	glm::vec3 targetMu = glm::vec3(thrust::reduce(thrust_target, thrust_target + targetSize, glm::vec3(0.f))) / float(targetSize);
-	glm::vec3 startMu = glm::vec3(thrust::reduce(thrust_start, thrust_start + startSize, glm::vec3(0.f))) / float(startSize);
+	glm::vec3 targetMu = thrust::reduce(thrust_target, thrust_target + targetSize, glm::vec3(0.f))/ float(targetSize);
+	glm::vec3 startMu = thrust::reduce(thrust_start, thrust_start + startSize, glm::vec3(0.f))/ float(startSize);
 
 	translate << <targetblocksPerGrid, blockSize >> > (targetSize, dev_target, -targetMu);
 	translate << <startblocksPerGrid, blockSize >> > (startSize, dev_start, -startMu);
@@ -378,19 +366,18 @@ void ICP::stepGPU() {
 	checkCUDAErrorWithLine("shuffle failed!");
 
 	// outer product of cor_target and dev_start for svd
-	glm::mat3 *dev_W, U, S, V;
-	cudaMalloc((void**)&dev_W, startSize * sizeof(glm::mat3));
-	cudaMemset(dev_W, 0, startSize * sizeof(glm::mat3));
+	glm::mat3 *dev_M, U, S, V;
+	cudaMalloc((void**)&dev_M, startSize * sizeof(glm::mat3));
+	cudaMemset(dev_M, 0, startSize * sizeof(glm::mat3));
 
-	outerProduct << <startblocksPerGrid, blockSize >> > (startSize, cor_target, dev_start, dev_W);
+	outerProduct << <startblocksPerGrid, blockSize >> > (startSize, cor_target, dev_start, dev_M);
 	checkCUDAErrorWithLine("outer product  failed!");
-	cudaDeviceSynchronize();
-	thrust::device_ptr<glm::mat3> thrust_W(dev_W);
-	glm::mat3 W = glm::mat3(thrust::reduce(thrust_W, thrust_W + startSize, glm::mat3(0.f)));
+
+	thrust::device_ptr<glm::mat3> thrust_M(dev_M);
+	glm::mat3 M = thrust::reduce(thrust_M, thrust_M + startSize, glm::mat3(0.f));
 
 	// svd
-	//svd(W, U, S, V);
-	svd(W[0][0], W[0][1], W[0][2], W[1][0], W[1][1], W[1][2], W[2][0], W[2][1], W[2][2],
+	svd(M[0][0], M[0][1], M[0][2], M[1][0], M[1][1], M[1][2], M[2][0], M[2][1], M[2][2],
 		U[0][0], U[0][1], U[0][2], U[1][0], U[1][1], U[1][2], U[2][0], U[2][1], U[2][2],
 		S[0][0], S[0][1], S[0][2], S[1][0], S[1][1], S[1][2], S[2][0], S[2][1], S[2][2],
 		V[0][0], V[0][1], V[0][2], V[1][0], V[1][1], V[1][2], V[2][0], V[2][1], V[2][2]
@@ -408,7 +395,7 @@ void ICP::stepGPU() {
 	cudaMemcpy(dev_target, &dev_pos[startSize], targetSize * sizeof(glm::vec3), cudaMemcpyDeviceToDevice);
 
 	cudaFree(cor_target);
-	cudaFree(dev_W);
+	cudaFree(dev_M);
 	checkCUDAErrorWithLine("free memeory failed!");
 }
 
@@ -419,7 +406,5 @@ void ICP::unitTest() {
 	//m(0, 1) = -1;
 	//m(1, 1) = m(1, 0) + m(0, 1);
 	//std::cout << m << std::endl;
-
-	
 	return;
 }
