@@ -349,8 +349,8 @@ void ICP::stepGPU() {
 	thrust::device_ptr<glm::vec3> thrust_target(dev_target);
 	thrust::device_ptr<glm::vec3> thrust_start(dev_start);
 
-	glm::vec3 targetMu = thrust::reduce(thrust_target, thrust_target + targetSize, glm::vec3(0.f))/ float(targetSize);
-	glm::vec3 startMu = thrust::reduce(thrust_start, thrust_start + startSize, glm::vec3(0.f))/ float(startSize);
+	glm::vec3 targetMu = thrust::reduce(thrust_target, thrust_target + targetSize, glm::vec3(0.0f))/ float(targetSize);
+	glm::vec3 startMu = thrust::reduce(thrust_start, thrust_start + startSize, glm::vec3(0.0f))/ float(startSize);
 
 	translate << <targetblocksPerGrid, blockSize >> > (targetSize, dev_target, -targetMu);
 	translate << <startblocksPerGrid, blockSize >> > (startSize, dev_start, -startMu);
@@ -368,13 +368,13 @@ void ICP::stepGPU() {
 	// outer product of cor_target and dev_start for svd
 	glm::mat3 *dev_M, U, S, V;
 	cudaMalloc((void**)&dev_M, startSize * sizeof(glm::mat3));
-	cudaMemset(dev_M, 0, startSize * sizeof(glm::mat3));
+	cudaMemset(dev_M, 0.0f, startSize * sizeof(glm::mat3));
 
 	outerProduct << <startblocksPerGrid, blockSize >> > (startSize, cor_target, dev_start, dev_M);
 	checkCUDAErrorWithLine("outer product  failed!");
 
 	thrust::device_ptr<glm::mat3> thrust_M(dev_M);
-	glm::mat3 M = thrust::reduce(thrust_M, thrust_M + startSize, glm::mat3(0.f));
+	glm::mat3 M = thrust::reduce(thrust_M, thrust_M + startSize, glm::mat3(0.0f));
 
 	// svd
 	svd(M[0][0], M[0][1], M[0][2], M[1][0], M[1][1], M[1][2], M[2][0], M[2][1], M[2][2],

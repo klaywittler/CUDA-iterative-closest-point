@@ -14,7 +14,7 @@
 // ================
 #define VISUALIZE 1
 #define TIME 0
-#define GPU 1
+#define GPU 0
 
 int N_FOR_VIS;
 const PointCloud *start = NULL;
