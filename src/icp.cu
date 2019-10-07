@@ -12,6 +12,9 @@
 
 #define checkCUDAErrorWithLine(msg) checkCUDAError(msg, __LINE__)
 
+#define OCTREE 0
+#define TRANSFORM 1
+
 /**
 * Check for CUDA errors; print and exit if there was a problem.
 */
@@ -46,7 +49,9 @@ int numObjects;
 int startSize;
 int targetSize;
 
-dim3 threadsPerBlock(blockSize);
+//dim3 threadsPerBlock(blockSize);
+//dim3 startblocksPerGrid(blockSize);
+//dim3 targetblocksPerGrid(blockSize);
 
 glm::vec3 *dev_pos;
 glm::vec3 *dev_start;
@@ -89,6 +94,22 @@ __global__ void kernColorBuffer(int N, glm::vec3 *intBuffer, glm::vec3 value) {
 	}
 	intBuffer[index] = value;
 }
+
+void transformCPU(glm::vec3 *start, glm::mat3 &R, glm::vec3 &T) {
+	for (int i = 0; i < startSize; i++) {
+		start[i] = R * start[i] + T;
+	}
+}
+
+__global__ void transform(int n, glm::vec3 *pos, glm::mat3 R, glm::vec3 T) {
+	int index = threadIdx.x + (blockIdx.x * blockDim.x);
+	if (index >= n) {
+		return;
+	}
+	pos[index] = R * pos[index] + T;
+}
+
+
 /**
 * Initialize memory, update some globals
 */
@@ -96,7 +117,9 @@ void ICP::initSimulation(std::vector<glm::vec3> start, std::vector<glm::vec3> ta
 	startSize = start.size();
 	targetSize = target.size();
 	numObjects = startSize + targetSize;
-	dim3 fullBlocksPerGrid((numObjects + blockSize - 1) / blockSize);
+
+	dim3 startblocksPerGrid((startSize + blockSize - 1) / blockSize);
+	dim3 targetblocksPerGrid((targetSize + blockSize - 1) / blockSize);
 
 	// Don't forget to cudaFree in  ICP::endSimulation.
 	cudaMalloc((void**)&dev_start, startSize * sizeof(glm::vec3));
@@ -118,23 +141,32 @@ void ICP::initSimulation(std::vector<glm::vec3> start, std::vector<glm::vec3> ta
 	cudaMemcpy(dev_start, &start[0], startSize * sizeof(glm::vec3), cudaMemcpyHostToDevice);
 	cudaMemcpy(dev_target, &target[0], targetSize * sizeof(glm::vec3), cudaMemcpyHostToDevice);
 
-	cudaMemcpy(dev_pos, dev_start, startSize * sizeof(glm::vec3), cudaMemcpyDeviceToDevice);
-	cudaMemcpy(&dev_pos[startSize], dev_target, targetSize * sizeof(glm::vec3), cudaMemcpyDeviceToDevice);
-
-	//set colors for points
-	dim3 startBlocks((numObjects + blockSize - 1) / blockSize);
-	dim3 targetBlocks((numObjects + blockSize - 1) / blockSize);
-	kernColorBuffer << <startBlocks, blockSize >> > (startSize, dev_color, glm::vec3(0, 1, 0));
-	kernColorBuffer << <targetBlocks, blockSize >> > (targetSize, &dev_color[startSize], glm::vec3(1, 0, 0));
-
-	cudaDeviceSynchronize();
-
 	host_start = (glm::vec3*) malloc(startSize * sizeof(glm::vec3));
 	host_target = (glm::vec3*) malloc(targetSize * sizeof(glm::vec3));
 	cor = (int*) malloc(startSize * sizeof(int));
 
 	memcpy(host_start, &start[0], startSize * sizeof(glm::vec3));
 	memcpy(host_target, &target[0], targetSize * sizeof(glm::vec3));
+
+#if TRANSFORM
+	//add rotation and translation to start for test;
+	glm::vec3 T(5.0, -18.0, 10.0);
+	//glm::mat3 R = glm::mat3(glm::vec3(0.866, -0.5, 0.0), glm::vec3(0.25, 0.433, -0.866), glm::vec3(0.433, 0.75, 0.5));
+	glm::mat3 R = glm::mat3(glm::vec3(0.866, -0.5, 0.0), glm::vec3(0.5, 0.866, 0), glm::vec3(0.0, 0.0, 1.0));
+
+	// move target set
+	transform << <startblocksPerGrid, blockSize >> > (startSize, dev_start, R, T);
+	transformCPU(host_start, R, T);
+#endif
+
+	cudaMemcpy(dev_pos, dev_start, startSize * sizeof(glm::vec3), cudaMemcpyDeviceToDevice);
+	cudaMemcpy(&dev_pos[startSize], dev_target, targetSize * sizeof(glm::vec3), cudaMemcpyDeviceToDevice);
+
+	//set colors for points
+	kernColorBuffer << <startblocksPerGrid, blockSize >> > (startSize, dev_color, glm::vec3(0, 1, 0));
+	kernColorBuffer << <targetblocksPerGrid, blockSize >> > (targetSize, &dev_color[startSize], glm::vec3(1, 0, 0));
+
+	cudaDeviceSynchronize();
 }
 
 
@@ -218,13 +250,6 @@ void outerProductCPU(glm::vec3 *target, glm::vec3 *start, glm::mat3 &product) {
 		product += glm::outerProduct(start[i], target[i]);
 	}
 }
-
-void transformCPU(glm::vec3 *start, glm::mat3 &R, glm::vec3 &T) {
-	for (int i = 0; i < startSize; i++) {
-		start[i] = R * start[i] + T;
-	}
-}
-
 
 void ICP::stepCPU() {
 	glm::vec3 *temp_start = (glm::vec3*) malloc(startSize * sizeof(glm::vec3));
@@ -318,14 +343,6 @@ __global__ void shuffleTarget(int n, glm::vec3 *dev_target, glm::vec3 *cor_targe
 	cor_target[index] = dev_target[cor[index]];
 }
 
-__global__ void translate(int n, glm::vec3 *pos, glm::vec3 T) {
-	int index = threadIdx.x + (blockIdx.x * blockDim.x);
-	if (index >= n) {
-		return;
-	}
-	pos[index] = pos[index] + T;
-}
-
 __global__ void outerProduct(int n, glm::vec3 *dev_target, glm::vec3 *dev_start, glm::mat3 *product) {
 	int index = threadIdx.x + (blockIdx.x * blockDim.x);
 	if (index >= n) {
@@ -334,26 +351,19 @@ __global__ void outerProduct(int n, glm::vec3 *dev_target, glm::vec3 *dev_start,
 	 product[index] = glm::outerProduct(dev_start[index], dev_target[index]);
 }
 
-__global__ void transform(int n, glm::vec3 *pos, glm::mat3 R, glm::vec3 T) {
-	int index = threadIdx.x + (blockIdx.x * blockDim.x);
-	if (index >= n) {
-		return;
-	}
-	pos[index] = R * pos[index] + T;
-}
-
 void ICP::stepGPU() {
 	dim3 startblocksPerGrid((startSize + blockSize - 1) / blockSize);
 	dim3 targetblocksPerGrid((targetSize + blockSize - 1) / blockSize);
+
 	// mean center both data sets
 	thrust::device_ptr<glm::vec3> thrust_target(dev_target);
 	thrust::device_ptr<glm::vec3> thrust_start(dev_start);
 
-	glm::vec3 targetMu = thrust::reduce(thrust_target, thrust_target + targetSize, glm::vec3(0.0f))/ float(targetSize);
-	glm::vec3 startMu = thrust::reduce(thrust_start, thrust_start + startSize, glm::vec3(0.0f))/ float(startSize);
+	glm::vec3 targetMu = thrust::reduce(thrust_target, thrust_target + targetSize, glm::vec3(0.0f)) / float(targetSize);
+	glm::vec3 startMu = thrust::reduce(thrust_start, thrust_start + startSize, glm::vec3(0.0f)) / float(startSize);
 
-	translate << <targetblocksPerGrid, blockSize >> > (targetSize, dev_target, -targetMu);
-	translate << <startblocksPerGrid, blockSize >> > (startSize, dev_start, -startMu);
+	transform << <targetblocksPerGrid, blockSize >> > (targetSize, dev_target, glm::mat3(1.0f), -targetMu);
+	transform << <startblocksPerGrid, blockSize >> > (startSize, dev_start, glm::mat3(1.0f), -startMu);
 	checkCUDAErrorWithLine("mean center failed!");
 
 	// find correspondences
