@@ -8,6 +8,10 @@
 PointCloud::PointCloud(string filename) {
     cout << "Reading PointCloud from " << filename << " ..." << endl;
     cout << " " << endl;
+	float factor = 1.0f;
+	if (filename.find("bunny") != std::string::npos) {
+		factor = 500.0f;
+	}
     char* fname = (char*)filename.c_str();
     fp_in.open(fname);
     if (!fp_in.is_open()) {
@@ -19,8 +23,8 @@ PointCloud::PointCloud(string filename) {
         utilityCore::safeGetline(fp_in, line);
         if (!line.empty()) {
             vector<string> tokens = utilityCore::tokenizeString(line);
-			glm::vec3 p(atoi(tokens[0].c_str()), atoi(tokens[1].c_str()), atoi(tokens[2].c_str()));
-			points.push_back(p);
+			glm::vec3 p(atof(tokens[0].c_str()), atof(tokens[1].c_str()), atof(tokens[2].c_str()));
+			points.push_back(factor*p);
         }
     }
 }

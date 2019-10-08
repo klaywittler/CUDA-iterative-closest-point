@@ -10,7 +10,7 @@
 #include <vector>
 
 namespace ICP {
-    void initSimulation(std::vector<glm::vec3> start, std::vector<glm::vec3> target);
+    void initSimulation(std::vector<glm::vec3> start, std::vector<glm::vec3> target, bool transformScan);
     void copyToVBO(float *vbodptr_positions, float *vbodptr_velocities);
 	void stepCPU();
 	void stepGPU();

@@ -10,10 +10,10 @@
 #include <cuda_runtime.h>
 #include "svd3.h"
 
+
 #define checkCUDAErrorWithLine(msg) checkCUDAError(msg, __LINE__)
 
 #define OCTREE 0
-#define TRANSFORM 1
 
 /**
 * Check for CUDA errors; print and exit if there was a problem.
@@ -95,9 +95,9 @@ __global__ void kernColorBuffer(int N, glm::vec3 *intBuffer, glm::vec3 value) {
 	intBuffer[index] = value;
 }
 
-void transformCPU(glm::vec3 *start, glm::mat3 &R, glm::vec3 &T) {
+void transformCPU(glm::vec3 *pos, glm::mat3 &R, glm::vec3 &T) {
 	for (int i = 0; i < startSize; i++) {
-		start[i] = R * start[i] + T;
+		pos[i] = R * pos[i] + T;
 	}
 }
 
@@ -113,7 +113,7 @@ __global__ void transform(int n, glm::vec3 *pos, glm::mat3 R, glm::vec3 T) {
 /**
 * Initialize memory, update some globals
 */
-void ICP::initSimulation(std::vector<glm::vec3> start, std::vector<glm::vec3> target) {
+void ICP::initSimulation(std::vector<glm::vec3> start, std::vector<glm::vec3> target, bool transformScan = true) {
 	startSize = start.size();
 	targetSize = target.size();
 	numObjects = startSize + targetSize;
@@ -148,16 +148,16 @@ void ICP::initSimulation(std::vector<glm::vec3> start, std::vector<glm::vec3> ta
 	memcpy(host_start, &start[0], startSize * sizeof(glm::vec3));
 	memcpy(host_target, &target[0], targetSize * sizeof(glm::vec3));
 
-#if TRANSFORM
-	//add rotation and translation to start for test;
-	glm::vec3 T(5.0, -18.0, 10.0);
-	//glm::mat3 R = glm::mat3(glm::vec3(0.866, -0.5, 0.0), glm::vec3(0.25, 0.433, -0.866), glm::vec3(0.433, 0.75, 0.5));
-	glm::mat3 R = glm::mat3(glm::vec3(0.866, -0.5, 0.0), glm::vec3(0.5, 0.866, 0), glm::vec3(0.0, 0.0, 1.0));
+	if (transformScan) {
+		//add rotation and translation to start for test;
+		glm::vec3 T(5.0, -18.0, 10.0);
+		glm::mat3 R = glm::mat3(glm::vec3(0.866, -0.5, 0.0), glm::vec3(0.25, 0.433, -0.866), glm::vec3(0.433, 0.75, 0.5));
+		//glm::mat3 R = glm::mat3(glm::vec3(0.866, -0.5, 0.0), glm::vec3(0.5, 0.866, 0), glm::vec3(0.0, 0.0, 1.0));
 
-	// move target set
-	transform << <startblocksPerGrid, blockSize >> > (startSize, dev_start, R, T);
-	transformCPU(host_start, R, T);
-#endif
+		// move target set
+		transform << <startblocksPerGrid, blockSize >> > (startSize, dev_start, R, T);
+		transformCPU(host_start, R, T);
+	}
 
 	cudaMemcpy(dev_pos, dev_start, startSize * sizeof(glm::vec3), cudaMemcpyDeviceToDevice);
 	cudaMemcpy(&dev_pos[startSize], dev_target, targetSize * sizeof(glm::vec3), cudaMemcpyDeviceToDevice);
@@ -247,7 +247,7 @@ void correspondenceCPU(glm::vec3 *start, glm::vec3 *target) {
 
 void outerProductCPU(glm::vec3 *target, glm::vec3 *start, glm::mat3 &product) {
 	for (int i = 0; i < startSize; i++) {
-		product += glm::outerProduct(start[i], target[i]);
+		product += glm::outerProduct(target[i], start[i]);
 	}
 }
 
@@ -296,12 +296,11 @@ void ICP::stepCPU() {
 	// outer product of cor_target and dev_start for svd
 	glm::mat3 M(0.0f), U, S, V;
 	outerProductCPU(cor_target, temp_start, M);
-
 	// svd
-	svd(M[0][0], M[0][1], M[0][2], M[1][0], M[1][1], M[1][2], M[2][0], M[2][1], M[2][2],
-		U[0][0], U[0][1], U[0][2], U[1][0], U[1][1], U[1][2], U[2][0], U[2][1], U[2][2],
-		S[0][0], S[0][1], S[0][2], S[1][0], S[1][1], S[1][2], S[2][0], S[2][1], S[2][2],
-		V[0][0], V[0][1], V[0][2], V[1][0], V[1][1], V[1][2], V[2][0], V[2][1], V[2][2]
+	svd(M[0][0], M[1][0], M[2][0], M[0][1], M[1][1], M[2][1], M[0][2], M[1][2], M[2][2],
+		U[0][0], U[1][0], U[2][0], U[0][1], U[1][1], U[2][1], U[0][2], U[1][2], U[2][2],
+		S[0][0], S[1][0], S[2][0], S[0][1], S[1][1], S[2][1], S[0][2], S[1][2], S[2][2],
+		V[0][0], V[1][0], V[2][0], V[0][1], V[1][1], V[2][1], V[0][2], V[1][2], V[2][2]
 	);
 
 	glm::mat3 I(1.0f);
@@ -335,6 +334,24 @@ __global__ void correspondenceGPU(int startSize, int targetSize, glm::vec3 *dev_
 	}
 }
 
+__global__ void correspondenceOctree(int startSize, int targetSize, glm::vec3 *dev_start, glm::vec3 *dev_target, int *dev_cor) {
+	int index = threadIdx.x + (blockIdx.x * blockDim.x);
+	if (index >= startSize) {
+		return;
+	}
+	float best = glm::distance(dev_start[index], dev_target[0]);
+	dev_cor[index] = 0;
+
+
+	for (int j = 1; j < targetSize; j++) {
+		float dist = glm::distance(dev_start[index], dev_target[j]);
+		if (dist < best) {
+			dev_cor[index] = j;
+			best = dist;
+		}
+	}
+}
+
 __global__ void shuffleTarget(int n, glm::vec3 *dev_target, glm::vec3 *cor_target, int *cor) {
 	int index = threadIdx.x + (blockIdx.x * blockDim.x);
 	if (index >= n) {
@@ -348,7 +365,7 @@ __global__ void outerProduct(int n, glm::vec3 *dev_target, glm::vec3 *dev_start,
 	if (index >= n) {
 		return;
 	}
-	 product[index] = glm::outerProduct(dev_start[index], dev_target[index]);
+	 product[index] = glm::outerProduct(dev_target[index], dev_start[index]);
 }
 
 void ICP::stepGPU() {
@@ -370,8 +387,13 @@ void ICP::stepGPU() {
 	glm::vec3 *cor_target;
 	cudaMalloc((void**)&cor_target, startSize * sizeof(glm::vec3));
 
+#if OCTREE
+
+#else
 	correspondenceGPU <<<startblocksPerGrid, blockSize >>> (startSize, targetSize, dev_start, dev_target, dev_cor);
 	checkCUDAErrorWithLine("correspondences failed!");
+#endif
+
 	shuffleTarget <<<startblocksPerGrid, blockSize >>> (startSize, dev_target, cor_target, dev_cor);
 	checkCUDAErrorWithLine("shuffle failed!");
 
@@ -387,10 +409,10 @@ void ICP::stepGPU() {
 	glm::mat3 M = thrust::reduce(thrust_M, thrust_M + startSize, glm::mat3(0.0f));
 
 	// svd
-	svd(M[0][0], M[0][1], M[0][2], M[1][0], M[1][1], M[1][2], M[2][0], M[2][1], M[2][2],
-		U[0][0], U[0][1], U[0][2], U[1][0], U[1][1], U[1][2], U[2][0], U[2][1], U[2][2],
-		S[0][0], S[0][1], S[0][2], S[1][0], S[1][1], S[1][2], S[2][0], S[2][1], S[2][2],
-		V[0][0], V[0][1], V[0][2], V[1][0], V[1][1], V[1][2], V[2][0], V[2][1], V[2][2]
+	svd(M[0][0], M[1][0], M[2][0], M[0][1], M[1][1], M[2][1], M[0][2], M[1][2], M[2][2],
+		U[0][0], U[1][0], U[2][0], U[0][1], U[1][1], U[2][1], U[0][2], U[1][2], U[2][2],
+		S[0][0], S[1][0], S[2][0], S[0][1], S[1][1], S[2][1], S[0][2], S[1][2], S[2][2],
+		V[0][0], V[1][0], V[2][0], V[0][1], V[1][1], V[2][1], V[0][2], V[1][2], V[2][2]
 	);
 
 	glm::mat3 I(1.0f);

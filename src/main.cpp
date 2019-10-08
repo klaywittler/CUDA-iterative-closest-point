@@ -15,10 +15,12 @@
 #define VISUALIZE 1
 #define TIME 0
 #define GPU 1
+#define TEST 0
 
 int N_FOR_VIS;
 const PointCloud *start = NULL;
 PointCloud *target = NULL;
+bool transformScan = false;
 
 /**
 * C main function.
@@ -26,8 +28,26 @@ PointCloud *target = NULL;
 int main(int argc, char* argv[]) {
 
 	projectName = "CUDA Accelerated ICP";
-	const char *startFile = argv[1] == NULL ? "../data/sine.txt" : argv[1];
-	const char *targetFile = argv[1] == NULL ? "../data/sine.txt" : argv[2];
+	const char *startFile, *targetFile;
+	if (argc == 1) {
+#if TEST
+		startFile = "../data/sine2.txt";
+		targetFile = "../data/sine2.txt";
+#else
+		startFile = "../data/bunny045.txt";
+		targetFile = "../data/bunny045.txt";
+#endif
+		transformScan = true;
+	}
+	else if (argc == 2) {
+		startFile = argv[1];
+		targetFile = argv[1];
+		transformScan = true;
+	}
+	else if(argc == 3) {
+		startFile = argv[1];
+		targetFile = argv[2];
+	}
 
 	start = new PointCloud(startFile);
 	target = new PointCloud(targetFile);
@@ -117,7 +137,7 @@ bool init(int argc, char **argv) {
 
 	// Initialize N-body simulation
 	ICP::unitTest();
-	ICP::initSimulation(start->points, target->points);
+	ICP::initSimulation(start->points, target->points, transformScan);
 
 	updateCamera();
 
