@@ -85,7 +85,7 @@ KD tree GPU | 0.00208 | 10
 We have 200 times the performance gain in doing the naive GPU implementation and a further 10 times performance gain in utilizing a spatial data structure.
 
 ## Running
- A benefit of this implementation is that the scans to not need to be exactly the same. This can be seen in the differences between the ```bunny045.txt``` and the ```bunny045_removed.txt``` where 2% of the data points have been removed at random. These will load by default unless other arguements are given. Two separate scan may be given or a signle scan can be given and the program with give one a set rotation and translation. All scans are in the ```./data``` folder where there are a couple test scans that consist of simple sine waves to help step through the algorithms and debug.
+ A benefit of this implementation is that the scans to not need to be exactly the same. This can be seen in the differences between the ```bunny045.txt``` and the ```bunny045_removed.txt``` where 5% of the data points have been removed at random. These will load by default unless other arguements are given. Two separate scan may be given or a signle scan can be given and the program with give one a set rotation and translation. All scans are in the ```./data``` folder where there are a couple test scans that consist of simple sine waves to help step through the algorithms and debug.
 
 
 ## Bloopers
