@@ -34,16 +34,6 @@ if(WIN32)
     set(CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER} CACHE FILEPATH "Host side compiler used by NVCC" FORCE)
 endif(WIN32)
 
-link_directories(${CUDA_TOOLKIT_ROOT_DIR}/lib/x64)
-########################################
-
-
-########################################
-# CPU Setup
-########################################
-#list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}")
-#find_package(Eigen3 REQUIRED)
-#include_directories(${EIGEN3_INCLUDE_DIR})
 ########################################
 
 find_package(OpenGL REQUIRED)
@@ -72,10 +62,6 @@ set(GLM_ROOT_DIR "external")
 find_package(GLM REQUIRED)
 include_directories(${GLM_INCLUDE_DIRS})
 
-#set(EIGEN_ROOT_DIR "external")
-#find_package(EIGEN REQUIRED)
-#include_directories(${EIGEN_INCLUDE_DIRS})
-
 set(headers
     src/cudaMat4.hpp
     src/glslUtility.hpp
@@ -84,7 +70,7 @@ set(headers
     src/utilityCore.hpp
     src/pointCloud.h
     src/svd3.h
-    src/svd.h
+    src/kdtree.hpp
     )
 
 set(sources
@@ -93,6 +79,7 @@ set(sources
     src/main.cpp
     src/utilityCore.cpp
     src/pointCloud.cpp
+    src/kdtree.cpp
     )
 
 list(SORT headers)
@@ -101,15 +88,10 @@ list(SORT sources)
 source_group(Headers FILES ${headers})
 source_group(Sources FILES ${sources})
 
-#include_directories(.)
-#add_subdirectory(Eigen)
-
 cuda_add_executable(${CMAKE_PROJECT_NAME} ${sources} ${headers})
 target_link_libraries(${CMAKE_PROJECT_NAME} 
     ${LIBRARIES}
     ${CUDA_LIBRARIES}
-    cublas
-    cusolver
     )
 
 add_custom_command(
