@@ -4,16 +4,13 @@
 #include <cmath>
 #include <thrust/reduce.h>
 #include <glm/glm.hpp>
+#include <cuda_runtime.h>
 #include "utilityCore.hpp"
 #include "icp.h"
-#include <cublas_v2.h>
-#include <cuda_runtime.h>
 #include "svd3.h"
-
+#include "kdtree.hpp"
 
 #define checkCUDAErrorWithLine(msg) checkCUDAError(msg, __LINE__)
-
-#define OCTREE 0
 
 /**
 * Check for CUDA errors; print and exit if there was a problem.
@@ -34,9 +31,10 @@ void checkCUDAError(const char *msg, int line = -1) {
 *****************/
 
 /*! Block size used for CUDA kernel launch. */
-#define blockSize 128
+#define blockSize 512
 /*! Size of the starting area in simulation space. */
 #define scene_scale 25.0f
+#define ERROR 1e-18f
 
 /*****************************
 * Self defined configuration *
@@ -48,6 +46,8 @@ void checkCUDAError(const char *msg, int line = -1) {
 int numObjects;
 int startSize;
 int targetSize;
+bool converged = false;
+float prev_error = 0.0;
 
 //dim3 threadsPerBlock(blockSize);
 //dim3 startblocksPerGrid(blockSize);
@@ -56,8 +56,9 @@ int targetSize;
 glm::vec3 *dev_pos;
 glm::vec3 *dev_start;
 glm::vec3 *dev_target;
-glm::vec3 *dev_color;
+glm::vec3 *dev_rgb;
 int *dev_cor;
+KDtree::KDnode *dev_kd;
 
 glm::vec3 *host_start;
 glm::vec3 *host_target;
@@ -66,27 +67,6 @@ int *cor;
 /******************
 * initSimulation *
 ******************/
-__host__ __device__ unsigned int hash(unsigned int a) {
-  a = (a + 0x7ed55d16) + (a << 12);
-  a = (a ^ 0xc761c23c) ^ (a >> 19);
-  a = (a + 0x165667b1) + (a << 5);
-  a = (a + 0xd3a2646c) ^ (a << 9);
-  a = (a + 0xfd7046c5) + (a << 3);
-  a = (a ^ 0xb55a4f09) ^ (a >> 16);
-  return a;
-}
-
-/**
-* LOOK-1.2 - this is a typical helper function for a CUDA kernel.
-* Function for generating a random vec3.
-*/
-__host__ __device__ glm::vec3 generateRandomVec3(float time, int index) {
-  thrust::default_random_engine rng(hash((int)(index * time)));
-  thrust::uniform_real_distribution<float> unitDistrib(-1, 1);
-
-  return glm::vec3((float)unitDistrib(rng), (float)unitDistrib(rng), (float)unitDistrib(rng));
-}
-
 __global__ void kernColorBuffer(int N, glm::vec3 *intBuffer, glm::vec3 value) {
 	int index = (blockIdx.x * blockDim.x) + threadIdx.x;
 	if (index >= N) {
@@ -131,13 +111,20 @@ void ICP::initSimulation(std::vector<glm::vec3> start, std::vector<glm::vec3> ta
 	cudaMalloc((void**)&dev_pos, numObjects * sizeof(glm::vec3));
 	checkCUDAErrorWithLine("cudaMalloc dev_pos failed!");
 
-	cudaMalloc((void**)&dev_color, numObjects * sizeof(glm::vec3));
-	checkCUDAErrorWithLine("cudaMalloc dev_color failed!");
+	cudaMalloc((void**)&dev_rgb, numObjects * sizeof(glm::vec3));
+	checkCUDAErrorWithLine("cudaMalloc dev_rgb failed!");
 
 	cudaMalloc((void**)&dev_cor, startSize * sizeof(int));
 	checkCUDAErrorWithLine("cudaMalloc dev_vel1 failed!");
 
+	cudaMalloc((void**)&dev_kd, targetSize * sizeof(KDtree::KDnode));
+	checkCUDAErrorWithLine("cudaMalloc dev_vel1 failed!");
+
+	std::unique_ptr< KDtree::KDnode> kd(new KDtree::KDnode[targetSize]);
+	KDtree::buildTree(target, kd.get());
+
 	// move start and target points to GPU
+	cudaMemcpy(dev_kd, kd.get(), targetSize * sizeof(KDtree::KDnode), cudaMemcpyHostToDevice);
 	cudaMemcpy(dev_start, &start[0], startSize * sizeof(glm::vec3), cudaMemcpyHostToDevice);
 	cudaMemcpy(dev_target, &target[0], targetSize * sizeof(glm::vec3), cudaMemcpyHostToDevice);
 
@@ -151,9 +138,8 @@ void ICP::initSimulation(std::vector<glm::vec3> start, std::vector<glm::vec3> ta
 	if (transformScan) {
 		//add rotation and translation to start for test;
 		glm::vec3 T(5.0, -18.0, 10.0);
-		glm::mat3 R = glm::mat3(glm::vec3(0.866, -0.5, 0.0), glm::vec3(0.25, 0.433, -0.866), glm::vec3(0.433, 0.75, 0.5));
-		//glm::mat3 R = glm::mat3(glm::vec3(0.866, -0.5, 0.0), glm::vec3(0.5, 0.866, 0), glm::vec3(0.0, 0.0, 1.0));
-
+		//glm::mat3 R = glm::mat3(glm::vec3(0.058, 0.25, 0.9665), glm::vec3(-0.8995, 0.433, -0.058), glm::vec3(-0.433, -0.866, 0.25)); // does not converge
+		glm::mat3 R = glm::mat3(glm::vec3(0.808, 0.25, -0.5335), glm::vec3(0.3995, 0.433, 0.808), glm::vec3(0.433, -0.866, 0.25)); // converges
 		// move target set
 		transform << <startblocksPerGrid, blockSize >> > (startSize, dev_start, R, T);
 		transformCPU(host_start, R, T);
@@ -163,19 +149,19 @@ void ICP::initSimulation(std::vector<glm::vec3> start, std::vector<glm::vec3> ta
 	cudaMemcpy(&dev_pos[startSize], dev_target, targetSize * sizeof(glm::vec3), cudaMemcpyDeviceToDevice);
 
 	//set colors for points
-	kernColorBuffer << <startblocksPerGrid, blockSize >> > (startSize, dev_color, glm::vec3(0, 1, 0));
-	kernColorBuffer << <targetblocksPerGrid, blockSize >> > (targetSize, &dev_color[startSize], glm::vec3(1, 0, 0));
+	kernColorBuffer << <startblocksPerGrid, blockSize >> > (startSize, dev_rgb, glm::vec3(0, 1, 0));
+	kernColorBuffer << <targetblocksPerGrid, blockSize >> > (targetSize, &dev_rgb[startSize], glm::vec3(1, 0, 0));
 
 	cudaDeviceSynchronize();
 }
-
 
 void ICP::endSimulation() {
 	cudaFree(dev_pos);
 	cudaFree(dev_start);
 	cudaFree(dev_target);
 	cudaFree(dev_cor);
-	cudaFree(dev_color);
+	cudaFree(dev_rgb);
+	cudaFree(dev_kd);
 
 	free(host_start);
 	free(host_target);
@@ -221,7 +207,7 @@ void ICP::copyToVBO(float *vbodptr_positions, float *vbodptr_velocities) {
   dim3 fullBlocksPerGrid((numObjects + blockSize - 1) / blockSize);
 
   kernCopyPositionsToVBO << <fullBlocksPerGrid, blockSize >> >(numObjects, dev_pos, vbodptr_positions, scene_scale);
-  kernCopyColorToVBO << <fullBlocksPerGrid, blockSize >> >(numObjects, dev_color, vbodptr_velocities, scene_scale);
+  kernCopyColorToVBO << <fullBlocksPerGrid, blockSize >> >(numObjects, dev_rgb, vbodptr_velocities, scene_scale);
 
   checkCUDAErrorWithLine("copyToVBO failed!");
 
@@ -233,15 +219,16 @@ void ICP::copyToVBO(float *vbodptr_positions, float *vbodptr_velocities) {
 ******************/
 void correspondenceCPU(glm::vec3 *start, glm::vec3 *target) {
 	for (int i = 0; i < startSize; i++) {
-		float best = glm::distance(start[i], target[0]);
-		cor[i] = 0;
+		float best_dist = glm::distance(start[i], target[0]);
+		int best_index = 0;
 		for (int j = 1; j < targetSize; j++) {
 			float dist = glm::distance(start[i], target[j]);
-			if (dist < best) {
-				cor[i] = j;
-				best = dist;
+			if (dist < best_dist) {
+				best_index = j;
+				best_dist = dist;
 			}
 		}
+		cor[i] = best_index;
 	}
 }
 
@@ -251,12 +238,20 @@ void outerProductCPU(glm::vec3 *target, glm::vec3 *start, glm::mat3 &product) {
 	}
 }
 
-void ICP::stepCPU() {
-	glm::vec3 *temp_start = (glm::vec3*) malloc(startSize * sizeof(glm::vec3));
-	glm::vec3 *temp_target = (glm::vec3*) malloc(targetSize * sizeof(glm::vec3));
+float convergenceCPU(glm::vec3 *target, glm::vec3 *start) {
+	float error = 0;
+	for (int i = 0; i < startSize; i++) {
+		error += glm::distance(start[i], target[cor[i]]);
+	}
+	return error/float(startSize);
+}
 
-	memcpy(temp_start, &host_start[0], startSize * sizeof(glm::vec3));
-	memcpy(temp_target, &host_target[0], targetSize * sizeof(glm::vec3));
+void ICP::stepCPU(bool checkConverge) {
+	std::unique_ptr<glm::vec3> temp_start(new glm::vec3[startSize]);
+	std::unique_ptr<glm::vec3> temp_target(new glm::vec3[targetSize]);
+
+	memcpy(temp_start.get(), &host_start[0], startSize * sizeof(glm::vec3));
+	memcpy(temp_target.get(), &host_target[0], targetSize * sizeof(glm::vec3));
 
 	glm::vec3 startMu(0.0f);
 	glm::vec3 targetMu(0.0f);
@@ -277,25 +272,25 @@ void ICP::stepCPU() {
 	i = 0;
 	while (i < startSize || i < targetSize) {
 		if (i < startSize) {
-			temp_start[i] -= startMu;
+			temp_start.get()[i] -= startMu;
 		}
 		if (i < targetSize) {
-			temp_target[i] -= targetMu;
+			temp_target.get()[i] -= targetMu;
 		}
 		i++;
 	}
 	   
 	// find correspondences
-	glm::vec3 *cor_target = (glm::vec3*) malloc(startSize * sizeof(glm::vec3));;
-	correspondenceCPU(temp_start, temp_start);
+	std::unique_ptr<glm::vec3> cor_target(new glm::vec3[startSize]);
+	correspondenceCPU(temp_start.get(), temp_start.get());
 	// shuffle
 	for (int i = 0; i < startSize; i++) {
-		cor_target[i] = temp_start[cor[i]];
+		cor_target.get()[i] = temp_start.get()[cor[i]];
 	}
 	
 	// outer product of cor_target and dev_start for svd
 	glm::mat3 M(0.0f), U, S, V;
-	outerProductCPU(cor_target, temp_start, M);
+	outerProductCPU(cor_target.get(), temp_start.get(), M);
 	// svd
 	svd(M[0][0], M[1][0], M[2][0], M[0][1], M[1][1], M[2][1], M[0][2], M[1][2], M[2][2],
 		U[0][0], U[1][0], U[2][0], U[0][1], U[1][1], U[2][1], U[0][2], U[1][2], U[2][2],
@@ -313,62 +308,89 @@ void ICP::stepCPU() {
 	transformCPU(host_start, R, T);
 	cudaMemcpy(dev_pos, &host_start[0], startSize * sizeof(glm::vec3), cudaMemcpyHostToDevice);
 
-	free(temp_start);
-	free(temp_target);
-	free(cor_target);
+	if (checkConverge) {
+		float error = convergenceCPU(host_target, host_start);
+		if (abs(error-prev_error) < ERROR) {
+			converged = true;
+			std::cout << "CPU average error: " << error << std::endl;
+		}
+		prev_error = error;
+	}
+
 }
 
-__global__ void correspondenceGPU(int startSize, int targetSize, glm::vec3 *dev_start, glm::vec3 *dev_target, int *dev_cor){
+__global__ void correspondenceNaive(int startSize, int targetSize, glm::vec3 *dev_start, glm::vec3 *dev_target, int *dev_cor){
 	int index = threadIdx.x + (blockIdx.x * blockDim.x);
 	if (index >= startSize) {
 		return;
 	}
-	float best = glm::distance(dev_start[index], dev_target[0]);
-	dev_cor[index] = 0;
+	float best_dist = glm::distance(dev_start[index], dev_target[0]);
+	int best_index = 0;
 	for (int j = 1; j < targetSize; j++) {
 		float dist = glm::distance(dev_start[index], dev_target[j]);
-		if (dist < best) {
-			dev_cor[index] = j;
-			best = dist;
+		if (dist < best_dist) {
+			best_dist = dist;
+			best_index = j;
 		}
 	}
+	dev_cor[index] = best_index;
 }
 
-__global__ void correspondenceOctree(int startSize, int targetSize, glm::vec3 *dev_start, glm::vec3 *dev_target, int *dev_cor) {
+__global__ void correspondenceKDtree(int startSize, int targetSize, glm::vec3 *dev_start, glm::vec3 *dev_target, int *dev_cor, const KDtree::KDnode *tree) {
 	int index = threadIdx.x + (blockIdx.x * blockDim.x);
 	if (index >= startSize) {
 		return;
 	}
-	float best = glm::distance(dev_start[index], dev_target[0]);
-	dev_cor[index] = 0;
+	int best_index = 0, root = 0;
+	float best_dist = glm::distance(dev_start[index], dev_target[tree[root].current]);
+	bool finished = false, explored = false;
 
-
-	for (int j = 1; j < targetSize; j++) {
-		float dist = glm::distance(dev_start[index], dev_target[j]);
-		if (dist < best) {
-			dev_cor[index] = j;
-			best = dist;
+	while (!finished) {
+		while (root >= 0) { //while not a leaf node
+			const KDtree::KDnode target = tree[root];
+			float dist = glm::distance(dev_start[index], dev_target[target.current]);
+			if (dist < best_dist) {
+				best_index = root;
+				best_dist = dist;
+				explored = false;
+			}
+			root = dev_start[index][target.split_axis] < dev_target[target.current][target.split_axis] ? target.left : target.right;
+		}
+		if (explored) {
+			finished = true;
+		}
+		else { //check other branches
+			const KDtree::KDnode parent = tree[tree[best_index].parent];
+			float parent_dist = fabs(dev_start[index][parent.split_axis] - dev_target[parent.current][parent.split_axis]);
+			if (parent_dist < best_dist) {
+				root = dev_start[index][parent.split_axis] < dev_target[parent.current][parent.split_axis] ? parent.right : parent.left;
+				explored = true;
+			}
+			else {
+				finished = true;
+			}
 		}
 	}
+	dev_cor[index] = tree[best_index].current;
 }
 
-__global__ void shuffleTarget(int n, glm::vec3 *dev_target, glm::vec3 *cor_target, int *cor) {
+__global__ void outerProduct(int n, glm::vec3 *dev_target, glm::vec3 *dev_start, int *dev_cor, glm::mat3 *product) {
 	int index = threadIdx.x + (blockIdx.x * blockDim.x);
 	if (index >= n) {
 		return;
 	}
-	cor_target[index] = dev_target[cor[index]];
+	 product[index] = glm::outerProduct(dev_target[dev_cor[index]], dev_start[index]);
 }
 
-__global__ void outerProduct(int n, glm::vec3 *dev_target, glm::vec3 *dev_start, glm::mat3 *product) {
+__global__ void convergence(int startSize, glm::vec3 *dev_target, glm::vec3 *dev_start, int *cor, int *error) {
 	int index = threadIdx.x + (blockIdx.x * blockDim.x);
-	if (index >= n) {
+	if (index >= startSize) {
 		return;
 	}
-	 product[index] = glm::outerProduct(dev_target[index], dev_start[index]);
+	error[index] = glm::distance(dev_target[cor[index]], dev_start[index]);
 }
 
-void ICP::stepGPU() {
+void icpGPU(bool kdtree = false, bool checkConverge = false) {
 	dim3 startblocksPerGrid((startSize + blockSize - 1) / blockSize);
 	dim3 targetblocksPerGrid((targetSize + blockSize - 1) / blockSize);
 
@@ -383,26 +405,22 @@ void ICP::stepGPU() {
 	transform << <startblocksPerGrid, blockSize >> > (startSize, dev_start, glm::mat3(1.0f), -startMu);
 	checkCUDAErrorWithLine("mean center failed!");
 
-	// find correspondences
-	glm::vec3 *cor_target;
-	cudaMalloc((void**)&cor_target, startSize * sizeof(glm::vec3));
-
-#if OCTREE
-
-#else
-	correspondenceGPU <<<startblocksPerGrid, blockSize >>> (startSize, targetSize, dev_start, dev_target, dev_cor);
-	checkCUDAErrorWithLine("correspondences failed!");
-#endif
-
-	shuffleTarget <<<startblocksPerGrid, blockSize >>> (startSize, dev_target, cor_target, dev_cor);
-	checkCUDAErrorWithLine("shuffle failed!");
+	// find correspondence
+	if (kdtree) {
+		correspondenceKDtree << <startblocksPerGrid, blockSize >> > (startSize, targetSize, dev_start, dev_target, dev_cor, dev_kd);
+		checkCUDAErrorWithLine("Octree correspondences failed!");
+	}
+	else {
+		correspondenceNaive << <startblocksPerGrid, blockSize >> > (startSize, targetSize, dev_start, dev_target, dev_cor);
+		checkCUDAErrorWithLine("correspondences failed!");
+	}
 
 	// outer product of cor_target and dev_start for svd
 	glm::mat3 *dev_M, U, S, V;
 	cudaMalloc((void**)&dev_M, startSize * sizeof(glm::mat3));
 	cudaMemset(dev_M, 0.0f, startSize * sizeof(glm::mat3));
 
-	outerProduct << <startblocksPerGrid, blockSize >> > (startSize, cor_target, dev_start, dev_M);
+	outerProduct << <startblocksPerGrid, blockSize >> > (startSize, dev_target, dev_start, dev_cor, dev_M);
 	checkCUDAErrorWithLine("outer product  failed!");
 
 	thrust::device_ptr<glm::mat3> thrust_M(dev_M);
@@ -426,17 +444,37 @@ void ICP::stepGPU() {
 	cudaMemcpy(dev_start, dev_pos, startSize * sizeof(glm::vec3), cudaMemcpyDeviceToDevice);
 	cudaMemcpy(dev_target, &dev_pos[startSize], targetSize * sizeof(glm::vec3), cudaMemcpyDeviceToDevice);
 
-	cudaFree(cor_target);
+	if (checkConverge) {
+		int *dev_error;
+		cudaMalloc((void**)&dev_error, startSize * sizeof(int));
+		convergence <<< startblocksPerGrid, blockSize >>> (startSize, dev_target, dev_start, dev_cor, dev_error);
+
+		thrust::device_ptr<int> thrust_error(dev_error);
+		float error = thrust::reduce(thrust_error, thrust_error + startSize, 0.0f) / float(startSize);
+		if (abs(error - prev_error) < ERROR) {
+			converged = true;
+			std::cout << "GPU average error: " << error << std::endl;
+		}
+		prev_error = error;
+		cudaFree(dev_error);
+	}
+
 	cudaFree(dev_M);
 	checkCUDAErrorWithLine("free memeory failed!");
 }
 
+void ICP::stepNaive(bool checkConverge) {
+	icpGPU(false, checkConverge);
+}
+
+void ICP::stepKDtree(bool checkConverge) {
+	icpGPU(true, checkConverge);
+}
+
+bool ICP::checkConvergence() {
+	return converged;
+}
+
 void ICP::unitTest() {
-	//Eigen::MatrixXd m(2, 2);
-	//m(0, 0) = 3;
-	//m(1, 0) = 2.5;
-	//m(0, 1) = -1;
-	//m(1, 1) = m(1, 0) + m(0, 1);
-	//std::cout << m << std::endl;
 	return;
 }

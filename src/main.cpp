@@ -1,21 +1,25 @@
-/**
-* @file      main.cpp
-* @brief     Example Boids flocking simulation for CIS 565
-* @authors   Liam Boone, Kai Ninomiya, Kangning (Gary) Li
-* @date      2013-2016
-* @copyright University of Pennsylvania
-*/
-
 #include "main.hpp"
 #include "pointCloud.h"
+#include "windows.h"
 
 // ================
 // Configuration
 // ================
-#define VISUALIZE 1
-#define TIME 0
-#define GPU 1
-#define TEST 0
+bool checkConverge = false; // set true to stop after convergence
+#define VISUALIZE 1 // render
+#define TIME 0 // time and save to csv
+#define GPU 1 // enable gpu
+#define KDTREE 1 // enable KD tree optimization on gpu
+#define DEBUG 0 // simple sine wave to debug
+
+// ================
+// Events for timing
+// ================
+#define TIMEKEEPING_FRAMESIZE 1 // frames to average time over 
+const char timingFileName[] = "../data/time/000accident.csv";
+std::chrono::steady_clock::time_point firstStart, startTime, stopTime;
+long numSteps = 0;
+std::vector<timeRecord> eventRecords = {};
 
 int N_FOR_VIS;
 const PointCloud *start = NULL;
@@ -30,11 +34,11 @@ int main(int argc, char* argv[]) {
 	projectName = "CUDA Accelerated ICP";
 	const char *startFile, *targetFile;
 	if (argc == 1) {
-#if TEST
+#if DEBUG
 		startFile = "../data/sine2.txt";
 		targetFile = "../data/sine2.txt";
 #else
-		startFile = "../data/bunny045.txt";
+		startFile = "../data/bunny045_removed.txt";
 		targetFile = "../data/bunny045.txt";
 #endif
 		transformScan = true;
@@ -136,8 +140,9 @@ bool init(int argc, char **argv) {
 	cudaGLRegisterBufferObject(boidVBO_velocities);
 
 	// Initialize N-body simulation
-	ICP::unitTest();
 	ICP::initSimulation(start->points, target->points, transformScan);
+
+	ICP::unitTest();
 
 	updateCamera();
 
@@ -223,26 +228,31 @@ void runCUDA() {
 	cudaGLMapBufferObject((void**)&dptrVertVelocities, boidVBO_velocities);
 
 	#if TIME
-	cudaEvent_t event1, event2;
-	cudaEventCreate(&event1);
-	cudaEventCreate(&event2);
-
-	//record events around kernel launch
-	cudaEventRecord(event1, 0); //where 0 is the default stream
+		if (numSteps == 0) {
+			firstStart = std::chrono::high_resolution_clock::now();
+		}
+		if (numSteps % TIMEKEEPING_FRAMESIZE == 0) {
+			startTime = std::chrono::high_resolution_clock::now();
+		}
 	#endif
 
 	#if GPU
-	ICP::stepGPU();
+		#if KDTREE
+		ICP::stepKDtree(checkConverge);
+		#else
+		ICP::stepNaive(checkConverge);
+		#endif
 	#else
-	ICP::stepCPU();
+	ICP::stepCPU(checkConverge);
 	#endif
 
+	numSteps++;
 	#if TIME
-	cudaEventRecord(event2, 0);
-	//calculate time
-	float dt_ms;
-	cudaEventElapsedTime(&dt_ms, event1, event2);
-	printf("Uniform grid time: %f ms \n", dt_ms);
+		if (numSteps % TIMEKEEPING_FRAMESIZE == 0) {
+			stopTime = std::chrono::high_resolution_clock::now();
+			recordTime(startTime, stopTime);
+		}//if
+
 	#endif
 
 	#if VISUALIZE
@@ -258,9 +268,6 @@ void mainLoop() {
 	double timebase = 0;
 	int frame = 0;
 
-	//Boids::unitTest(); // LOOK-1.2 We run some basic example code to make sure
-						// your CUDA development setup is ready to go.
-
 	while (!glfwWindowShouldClose(window)) {
 		glfwPollEvents();
 
@@ -274,6 +281,11 @@ void mainLoop() {
 		}
 
 		runCUDA();
+		if (checkConverge) {
+			if (ICP::checkConvergence()) {
+				break;
+			}
+		}
 
 		std::ostringstream ss;
 		ss << "[";
@@ -297,6 +309,9 @@ void mainLoop() {
 		glfwSwapBuffers(window);
 		#endif
 	}
+	#if TIME 
+		writeTime(timingFileName);
+	#endif
 	glfwDestroyWindow(window);
 	glfwTerminate();
 }
@@ -352,3 +367,27 @@ void updateCamera() {
 		glUniformMatrix4fv(location, 1, GL_FALSE, &projection[0][0]);
 	}
 }
+
+
+void recordTime(std::chrono::steady_clock::time_point begin, std::chrono::steady_clock::time_point end) {
+	long long microseconds = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
+	long totalTime = std::chrono::duration_cast<std::chrono::milliseconds>(end - firstStart).count();
+	double numMs = microseconds / 1000;
+
+	eventRecords.push_back({ numSteps, numMs, totalTime });
+
+}//recordTime
+
+void writeTime(const char* fileName) {
+	FILE* of = fopen(fileName, "w");
+
+	for (auto& record : eventRecords) {
+		double millisPerFrame = record.time / TIMEKEEPING_FRAMESIZE;
+		millisPerFrame /= 1000.0;//seconds per frame
+		double fps = 1.0 / millisPerFrame;
+		double seconds = record.totalTime / 1000.0;
+		fprintf(of, "%d,%0.3f,%f\n", record.frameNo, seconds, fps);
+	}//for
+
+	fclose(of);
+}//writeTime

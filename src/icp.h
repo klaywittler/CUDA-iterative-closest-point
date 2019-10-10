@@ -12,8 +12,10 @@
 namespace ICP {
     void initSimulation(std::vector<glm::vec3> start, std::vector<glm::vec3> target, bool transformScan);
     void copyToVBO(float *vbodptr_positions, float *vbodptr_velocities);
-	void stepCPU();
-	void stepGPU();
+	void stepCPU(bool checkConverge = false);
+	void stepNaive(bool checkConverge = false);
+	void stepKDtree(bool checkConverge = false);
+	bool checkConvergence();
     void endSimulation();
     void unitTest();
 }
